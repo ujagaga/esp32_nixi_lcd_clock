@@ -7,6 +7,12 @@
 // remappable ESP32-C6 SPI pins below.
 // #define USE_ADAFRUIT_ST7789
 
+// Comment out for a single-screen setup: no external panels wired, the onboard
+// screen shows a big clock with a small weather icon+temp underneath. Leave
+// defined to drive the 4 external bit-banged digit panels for HH:MM, with the
+// onboard screen showing the larger weather forecast (icon+temp+precip) only.
+//#define USE_EXTERNAL_DIGIT_PANELS
+
 #define SCREEN_W  172
 #define SCREEN_H  320
 
@@ -32,7 +38,8 @@
 #define LOCATION_EEPROM_ADDR     (SSID_EEPROM_ADDR + SSID_SIZE)
 #define CUSTOM_LAT_EEPROM_ADDR   (LOCATION_EEPROM_ADDR + 1)
 #define CUSTOM_LON_EEPROM_ADDR   (CUSTOM_LAT_EEPROM_ADDR + sizeof(float))
-#define EEPROM_SIZE              (CUSTOM_LON_EEPROM_ADDR + sizeof(float))
+#define CLOCK_COLOR_EEPROM_ADDR  (CUSTOM_LON_EEPROM_ADDR + sizeof(float))
+#define EEPROM_SIZE              (CLOCK_COLOR_EEPROM_ADDR + sizeof(uint16_t))
 
 // ESP32-C6-LCD-1.47 onboard display pins (Waveshare wiki).
 #define TFT_MOSI  6

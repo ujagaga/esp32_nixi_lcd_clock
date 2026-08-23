@@ -10,6 +10,7 @@
 #define C_MAGENTA 0xF81F
 #define C_YELLOW 0xFFE0
 #define C_ORANGE 0xFC00
+#define C_GRAY 0xC618
 
 enum FontStyle {
   Font9pt,
@@ -31,11 +32,24 @@ extern int LCD_getY(void);
 extern void LCD_setCursor(int x, int y);
 extern void LCD_writeCentered(String msg, int y);
 extern void LCD_clearStringArea(String msg);
+// Draws a weather icon for one of weather.cpp's categories ("clear","partly",
+// "clouds","fog","drizzle","rain","snow","thunder"), centered horizontally at
+// baseline y, sized by radius r.
+extern void LCD_drawWeatherIcon(String category, int cy, int r);
+// Same icon, plus numStr (in numFont) and unitStr (in FontWeather, for the
+// degree sign) printed to its right on one row, icon flush near the left edge.
+// Leaves FontWeather set afterward.
+extern void LCD_drawWeatherRow(String category, int cy, int r, FontStyle numFont, String numStr, String unitStr);
 extern uint16_t LCD_getBgColor(void);
 extern void LCD_setBgColor(uint16_t color);
 extern uint16_t LCD_getFgColor(void);
 extern void LCD_setFgColor(uint16_t color);
 extern void LCD_setBacklight(uint8_t percent);   // 0..100
+
+// Color for the clock digits only (onboard HH:MM and/or the external digit
+// panels) -- not the weather icon/temp/precip, which keep their own colors.
+extern uint16_t LCD_getClockColor(void);    // loads from EEPROM (default C_YELLOW) on first call
+extern void LCD_setClockColor(uint16_t color);   // persists to EEPROM
 
 // 4 external bit-banged-SPI panels, one big digit each: hour tens, hour units,
 // minute tens, minute units.

@@ -64,6 +64,7 @@ static void display_station_info()
   LCD_write(NTPS_hasSynced() ? (NTPS_getHH() + ":" + NTPS_getMM()) : "syncing...");
 }
 
+#ifdef USE_EXTERNAL_DIGIT_PANELS
 // Onboard screen: weather only. The HH:MM digits themselves are shown on the
 // 4 external panels (see DIGITS_show), not here.
 static void display_weather()
@@ -71,11 +72,12 @@ static void display_weather()
   LCD_clear();
 
   if(WEATHER_hasData()){
+    LCD_drawWeatherIcon(WEATHER_getCategory(), 130, 55);
+
     LCD_setFont(FontWeather);
     LCD_textSize(1);
     LCD_color(C_WHITE);
     LCD_writeCentered(String(WEATHER_getTemp()) + "\xB0" + "C", 240);
-    LCD_writeCentered(remapSerbianDiacritics(translateWeatherCategory(WEATHER_getCategory())), 264);
 
     PrecipState precip = WEATHER_getPrecipState();
     if(precip != PRECIP_NONE){
@@ -84,23 +86,55 @@ static void display_weather()
     }
   }
 }
+#else
+// Single-screen setup: big clock, small weather icon+temp on one row underneath,
+// with room left for the precip-timing line below that.
+static void display_clock_and_weather()
+{
+  LCD_clear();
+  LCD_setFont(Font24pt);
+  LCD_textSize(3);
+  LCD_color(LCD_getClockColor());
+  LCD_writeCentered(NTPS_getHH(), 100);
+  LCD_writeCentered(NTPS_getMM(), 210);   // Font24pt at textSize(3) is ~93px tall; <110px apart and digits touch
+
+  if(WEATHER_hasData()){
+    LCD_textSize(1);
+    LCD_color(C_WHITE);
+    LCD_drawWeatherRow(WEATHER_getCategory(), 252, 20, Font18pt, String(WEATHER_getTemp()), String("\xB0") + "C");
+
+    PrecipState precip = WEATHER_getPrecipState();
+    if(precip != PRECIP_NONE){
+      LCD_textSize(1);
+      LCD_color(C_CYAN);
+      LCD_writeCentered(remapSerbianDiacritics(translatePrecipMessage(precip, WEATHER_getPrecipTime())), 296);
+    }
+  }
+}
+#endif
 
 // Poll the BOOT button (active low). Before the station connects, a debounced
 // press connects immediately instead of waiting out STA_CONNECT_DELAY_MS;
-// once connected, it instead cycles the backlight between 10% and 50%.
+// once connected, it instead cycles the backlight through BACKLIGHT_STEPS.
+static const uint8_t BACKLIGHT_STEPS[] = { 5, 12, 25, 50 };
+#define BACKLIGHT_STEP_COUNT (sizeof(BACKLIGHT_STEPS) / sizeof(BACKLIGHT_STEPS[0]))
+
 static void checkButton(void)
 {
   static bool wasPressed = false;
-  static uint8_t backlightPercent = 50;   // matches the LCD_init() default duty
+  static uint8_t backlightStep = BACKLIGHT_STEP_COUNT - 1;   // matches the LCD_init() default duty (50%)
   bool pressed = (digitalRead(BUTTON_PIN) == LOW);
 
   if(pressed && !wasPressed){
     delay(20);                                 // simple debounce
     if(digitalRead(BUTTON_PIN) == LOW){
       if(WIFIC_stationConnected()){
-        backlightPercent = (backlightPercent == 10) ? 50 : 10;
+        backlightStep = (backlightStep + 1) % BACKLIGHT_STEP_COUNT;
+        uint8_t backlightPercent = BACKLIGHT_STEPS[backlightStep];
         LCD_setBacklight(backlightPercent);
+#ifdef USE_EXTERNAL_DIGIT_PANELS
         DIGITS_setBacklight(backlightPercent);
+#endif
       }else{
         WIFIC_stationMode();
       }
@@ -120,7 +154,9 @@ void setup(void)
   WIFIC_init();
   HTTP_SERVER_init();
   LCD_init();
+#ifdef USE_EXTERNAL_DIGIT_PANELS
   DIGITS_init();
+#endif
   NTPS_init();
   WEATHER_init();
   display_hotspot_info();
@@ -153,8 +189,12 @@ void loop(void){
     String hhmm = hh + ":" + mm;
     if(hhmm != lastClockHHMM){
       lastClockHHMM = hhmm;
+#ifdef USE_EXTERNAL_DIGIT_PANELS
       display_weather();
       DIGITS_show(hh[0], hh[1], mm[0], mm[1]);
+#else
+      display_clock_and_weather();
+#endif
     }
   }
 }

@@ -4,21 +4,6 @@
 #include <Arduino.h>
 #include "weather.h"
 
-// On-screen text for each weather.cpp category ("clear","partly","clouds","fog",
-// "drizzle","rain","snow","thunder" -- see weatherMeta() in weather.cpp). Edit
-// here to change wording or language.
-static inline String translateWeatherCategory(String category){
-  if(category == "clear")   return "Vedro";
-  if(category == "partly")  return "Delimično";
-  if(category == "clouds")  return "Oblačno";
-  if(category == "fog")     return "Magla";
-  if(category == "drizzle") return "Rosulja";
-  if(category == "rain")    return "Kiša";
-  if(category == "snow")    return "Sneg";
-  if(category == "thunder") return "Grmljavina";
-  return category;
-}
-
 // Compact rain-timing line -- kept short since the panel is only 172px wide.
 // Returns "" for PRECIP_NONE (caller should skip drawing the line entirely).
 static inline String translatePrecipMessage(PrecipState state, String time){
@@ -31,7 +16,7 @@ static inline String translatePrecipMessage(PrecipState state, String time){
 // The embedded FreeMonoBold12pt8b font has no UTF-8 support (Adafruit_GFX reads
 // raw bytes, not decoded codepoints) -- it only has single-byte glyphs for
 // ASCII, the degree sign (0xB0), and 5 custom slots (0xB1-0xB5) for the Serbian
-// diacritics used above. This converts the UTF-8 text from translateWeatherCategory()
+// diacritics used above. This converts the UTF-8 text from translatePrecipMessage()
 // into those single-byte codes before rendering. Call it right before LCD_write*.
 static inline String remapSerbianDiacritics(const String& s){
   String out;

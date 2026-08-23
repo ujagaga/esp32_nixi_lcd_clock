@@ -12,7 +12,25 @@
 #include "config.h"
 #include "esp32_nixi_lcd_clock.h"
 #include "weather.h"
+#include "lcd_display.h"
 #include "http_ui.h"
+
+// <input type='color'> <-> RGB565 conversions, for the clock digit color field.
+static uint16_t hexToRGB565(String hex){
+  if(hex.length() && hex[0] == '#') hex = hex.substring(1);
+  long v = strtol(hex.c_str(), nullptr, 16);
+  uint8_t r = (v >> 16) & 0xFF, g = (v >> 8) & 0xFF, b = v & 0xFF;
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+static String rgb565ToHex(uint16_t c){
+  uint8_t r = ((c >> 11) & 0x1F) * 255 / 31;
+  uint8_t g = ((c >> 5) & 0x3F) * 255 / 63;
+  uint8_t b = (c & 0x1F) * 255 / 31;
+  char buf[8];
+  snprintf(buf, sizeof(buf), "#%02X%02X%02X", r, g, b);
+  return String(buf);
+}
 
 // --- Web server object ---
 WebServer* webServer = nullptr;
@@ -53,6 +71,10 @@ void showStartPage() {
   response += "<input id='lon' name='lon' value='" + String(WEATHER_getCustomLon(), 4) + "' placeholder='Longitude'><br>";
   response += "</div>";
 
+  response += "<label for='clockColor'>Clock digit color</label><br>";
+  response += "<input type='color' id='clockColor' name='clockColor' value='" +
+              rgb565ToHex(LCD_getClockColor()) + "'><br>";
+
   response += FPSTR(CONFIG_FORM_TAIL);
   response += FPSTR(HTML_END);
   webServer->send(200, "text/html", response);
@@ -89,6 +111,8 @@ static void saveWiFi(void){
   }else{
     WEATHER_setLocationIndex(loc);
   }
+
+  LCD_setClockColor(hexToRGB565(webServer->arg("clockColor")));
 
   String st_ssid = WIFIC_getStSSID();
   String st_pass = WIFIC_getStPass();

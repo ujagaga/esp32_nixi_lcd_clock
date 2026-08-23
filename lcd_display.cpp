@@ -1,4 +1,5 @@
 #include "config.h"
+#include <EEPROM.h>
 
 #ifdef USE_ADAFRUIT_ST7789
 #include <SPI.h>
@@ -311,6 +312,24 @@ void LCD_setBacklight(uint8_t percent){
   ledcWrite(TFT_BL, (uint32_t)percent * maxDuty / 100);
 }
 
+static uint16_t clockColor = 0;   // 0: not yet loaded from EEPROM (also the "unset" sentinel value)
+
+uint16_t LCD_getClockColor(void){
+  if(clockColor == 0){
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.get(CLOCK_COLOR_EEPROM_ADDR, clockColor);
+    if(clockColor == 0) clockColor = C_YELLOW;   // never set: default
+  }
+  return clockColor;
+}
+
+void LCD_setClockColor(uint16_t color){
+  clockColor = color;
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.put(CLOCK_COLOR_EEPROM_ADDR, color);
+  EEPROM.commit();
+}
+
 // NOTE: FreeType fonts draw on top of base line, so at coordinates 0,0 the text starts outside the screen.
 // First set font size and write a new line character. This will set the cursor at the right place for first row.
 void LCD_write(String msg)
@@ -329,6 +348,102 @@ void LCD_clearStringArea(String msg) {
   tft.fillRect(x1, y1, w, h, C_BLACK);
 }
 
+// 8 unit-ish direction vectors (x10), used to draw sun rays without pulling in <math.h>.
+static const int8_t RAY_DX[8] = { 10, 7, 0, -7, -10, -7, 0, 7 };
+static const int8_t RAY_DY[8] = { 0, 7, 10, 7, 0, -7, -10, -7 };
+
+static void drawSun(int cx, int cy, int r, uint16_t color){
+  tft.fillCircle(cx, cy, r / 2, color);
+  for(int i = 0; i < 8; i++){
+    int ix = cx + RAY_DX[i] * r * 6 / 100;
+    int iy = cy + RAY_DY[i] * r * 6 / 100;
+    int ox = cx + RAY_DX[i] * r / 10;
+    int oy = cy + RAY_DY[i] * r / 10;
+    tft.drawLine(ix, iy, ox, oy, color);
+  }
+}
+
+static void drawCloud(int cx, int cy, int w, uint16_t color){
+  tft.fillRoundRect(cx - w / 2, cy - w / 8, w, w / 3, w / 6, color);
+  tft.fillCircle(cx - w / 4, cy - w / 6, w / 4, color);
+  tft.fillCircle(cx + w / 6, cy - w / 4, w / 3, color);
+}
+
+// Short vertical dashes below a cloud, for drizzle/rain.
+static void drawDrops(int cx, int cy, int r, int count, int len, uint16_t color){
+  for(int i = 0; i < count; i++){
+    int x = cx - r * 3 / 5 + i * (r * 6 / 5) / (count - 1 > 0 ? count - 1 : 1);
+    tft.fillRect(x, cy, 2, len, color);
+  }
+}
+
+static void drawWeatherIconShape(String category, int cx, int cy, int r){
+  if(category == "clear"){
+    drawSun(cx, cy, r, C_YELLOW);
+  }else if(category == "partly"){
+    drawSun(cx + r * 3 / 10, cy - r * 3 / 10, r * 6 / 10, C_YELLOW);
+    drawCloud(cx - r / 10, cy + r * 2 / 10, r * 13 / 10, C_WHITE);
+  }else if(category == "clouds"){
+    drawCloud(cx, cy, r * 16 / 10, C_GRAY);
+  }else if(category == "fog"){
+    tft.fillRect(cx - r, cy - r / 2, r * 2, 3, C_GRAY);
+    tft.fillRect(cx - r + r / 3, cy - r / 6, r * 2 - r / 3, 3, C_GRAY);
+    tft.fillRect(cx - r, cy + r / 6, r * 2, 3, C_GRAY);
+    tft.fillRect(cx - r + r / 4, cy + r / 2, r * 2 - r / 4, 3, C_GRAY);
+  }else if(category == "drizzle"){
+    drawCloud(cx, cy - r / 4, r * 13 / 10, C_GRAY);
+    drawDrops(cx, cy + r / 3, r, 2, r / 4, C_CYAN);
+  }else if(category == "rain"){
+    drawCloud(cx, cy - r / 4, r * 13 / 10, C_GRAY);
+    drawDrops(cx, cy + r / 3, r, 4, r * 2 / 5, C_CYAN);
+  }else if(category == "snow"){
+    drawCloud(cx, cy - r / 4, r * 13 / 10, C_GRAY);
+    for(int i = 0; i < 3; i++){
+      int x = cx - r * 3 / 5 + i * (r * 6 / 5) / 2;
+      int y = cy + r / 3;
+      tft.drawLine(x - 4, y, x + 4, y, C_WHITE);
+      tft.drawLine(x, y - 4, x, y + 4, C_WHITE);
+    }
+  }else if(category == "thunder"){
+    drawCloud(cx, cy - r / 4, r * 13 / 10, C_GRAY);
+    int bx = cx, by = cy + r / 4;
+    tft.fillTriangle(bx + r / 6, by, bx - r / 8, by + r / 3, bx + r / 12, by + r / 3, C_YELLOW);
+    tft.fillTriangle(bx + r / 12, by + r / 3, bx - r / 4, by + r * 2 / 3, bx + r / 8, by + r / 3, C_YELLOW);
+  }
+}
+
+void LCD_drawWeatherIcon(String category, int cy, int r){
+  drawWeatherIconShape(category, tft.width() / 2, cy, r);
+}
+
+// Icon + temperature side by side on one row, icon flush near the left edge.
+// numStr is drawn in numFont; unitStr (the degree sign + "C") is drawn right
+// after it in FontWeather, since numFont may not have a degree-sign glyph.
+// Caller sets color beforehand, same as LCD_writeCentered. Leaves FontWeather
+// set on return.
+void LCD_drawWeatherRow(String category, int cy, int r, FontStyle numFont, String numStr, String unitStr){
+  int leftPad = 8;
+  int iconD = r * 2;
+  int gap = 10;
+  int unitGap = 4;
+
+  drawWeatherIconShape(category, leftPad + r, cy, r);
+
+  int16_t x1, y1;
+  uint16_t w, h;
+
+  LCD_setFont(numFont);
+  tft.getTextBounds(numStr, 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor(leftPad + iconD + gap - x1, cy - y1 - (int)h / 2);
+  tft.print(numStr);
+  int afterNumX = tft.getCursorX();
+
+  LCD_setFont(FontWeather);
+  tft.getTextBounds(unitStr, 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor(afterNumX + unitGap - x1, cy - y1 - (int)h / 2);
+  tft.print(unitStr);
+}
+
 void DIGITS_init()
 {
   pinMode(DIGIT_RST, OUTPUT);
@@ -342,7 +457,7 @@ void DIGITS_init()
   for (int i = 0; i < 4; i++) {
     digitPanels[i].begin();
     digitPanels[i].setFont(&FreeMonoBold175pt7b);
-    digitPanels[i].setTextColor(C_YELLOW);
+    digitPanels[i].setTextColor(LCD_getClockColor());
     digitPanels[i].fillScreen(C_BLACK);
   }
 }
@@ -357,6 +472,7 @@ static void showDigit(ST7789_BitBang &panel, char digit)
   int y = (SCREEN_H - (int)h) / 2 - y1;
 
   panel.fillScreen(C_BLACK);
+  panel.setTextColor(LCD_getClockColor());
   panel.setCursor(x, y);
   panel.print(s);
 }
