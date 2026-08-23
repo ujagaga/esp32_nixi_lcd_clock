@@ -22,9 +22,9 @@ static char st_ssid[SSID_SIZE] = {0};   // Saved SSID
 static char st_pass[WIFI_PASS_SIZE] = {0}; // Saved password
 static IPAddress stationIP;
 static IPAddress apIP(192, 168, 4, 1);
-static bool stationConnectedOnce = false; // mark first successful STA connect
-static unsigned long apIdleSince = 0;     // millis the AP last had zero clients
+static unsigned long bootMillis = 0;      // set once in WIFIC_init, for the AP grace period
 static bool apDisabled = false;           // AP turned off to save power
+static bool staStarted = false;           // first STA connect attempt made yet
 
 // -----------------------------------------------------------------------------
 // Getters
@@ -95,6 +95,7 @@ static void APMode(void) {
 // Wi-Fi STA mode
 // -----------------------------------------------------------------------------
 void WIFIC_stationMode(void) {
+    staStarted = true;   // also covers the delayed auto-trigger in WIFIC_process
     if (st_ssid[0] == 0) {
         Serial.println("No saved WiFi credentials.");
         return;
@@ -111,16 +112,10 @@ void WIFIC_setupCallbacks(void) {
     WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
         stationIP = WiFi.localIP();
         Serial.printf("\n\nConnected, IP: %s\n", stationIP.toString().c_str());
-
-        stationConnectedOnce = true;
-        apIdleSince = millis();          // start the AP power-down countdown
-
-        // If the AP was powered down earlier, the station must have dropped and
-        // recovered; AP is re-enabled by the disconnect handler, nothing to do.
     }, ARDUINO_EVENT_WIFI_STA_GOT_IP);
 
     WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
-        Serial.println("STA disconnected, will auto-reconnect.");
+        Serial.printf("STA disconnected, reason=%d, will auto-reconnect.\n", info.wifi_sta_disconnected.reason);
         if (apDisabled) {
             Serial.println("Re-enabling AP (station lost).");
             APMode();                    // bring the AP back so the device stays reachable
@@ -133,6 +128,7 @@ void WIFIC_setupCallbacks(void) {
 // Initialize Wi-Fi module
 // -----------------------------------------------------------------------------
 void WIFIC_init(void) {
+    bootMillis = millis();
     EEPROM.begin(EEPROM_SIZE);
 
     // Load saved password
@@ -153,32 +149,42 @@ void WIFIC_init(void) {
     } while (i < SSID_SIZE);
     st_ssid[i] = 0;
 
-    // Setup AP and STA
+    // Setup AP; the first STA connect attempt is delayed (see WIFIC_process)
+    // so it doesn't compete with the setup/scan window for the radio.
     APMode();
     WIFIC_setupCallbacks();
-    WIFIC_stationMode();
 }
 
 // -----------------------------------------------------------------------------
-// Periodic processing: drop the AP once the station is up and no AP clients
-// have been connected for AP_AUTO_OFF_MS (saves power in station-only mode).
+// Periodic processing:
+// - The first STA connect attempt waits until STA_CONNECT_DELAY_MS after boot,
+//   so the config page's WiFi scans have the single shared radio to themselves
+//   during setup (a concurrent STA connect/retry cycle starves scans of airtime).
+// - The AP stays up for at least AP_AUTO_OFF_MS after boot (grace period to
+//   reconfigure) regardless of station state; after that, it's only torn down
+//   once zero clients are connected to it -- never kicks an active client.
 // -----------------------------------------------------------------------------
 void WIFIC_process(void) {
-    if (apDisabled || !stationConnectedOnce || WiFi.status() != WL_CONNECTED) {
+    if (!staStarted && (millis() - bootMillis) >= STA_CONNECT_DELAY_MS) {
+        WIFIC_stationMode();
+    }
+
+    if (apDisabled) {
+        return;
+    }
+
+    if ((millis() - bootMillis) < AP_AUTO_OFF_MS) {
         return;
     }
 
     if (WiFi.softAPgetStationNum() > 0) {
-        apIdleSince = millis();          // clients present, keep the AP up
-        return;
+        return;                          // client present, keep the AP up
     }
 
-    if ((millis() - apIdleSince) > AP_AUTO_OFF_MS) {
-        Serial.println("No AP clients; disabling AP to save power.");
-        WiFi.softAPdisconnect(true);
-        WiFi.mode(WIFI_STA);
-        apDisabled = true;
-    }
+    Serial.println("No AP clients after grace period; disabling AP to save power.");
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_STA);
+    apDisabled = true;
 }
 
 // -----------------------------------------------------------------------------
@@ -192,9 +198,15 @@ void WIFIC_startScan(void) {
 }
 
 // Return the completed scan as a '|'-joined list, or "" if it is still running.
+// The radio can be too busy to even start a scan (e.g. mid STA reconnect); in
+// that case retry starting it so a later poll gets a real chance to complete.
 String WIFIC_getApList(void) {
     int n = WiFi.scanComplete();
-    if (n <= 0) {                        // -1 running, -2 failed, 0 none
+    if (n == WIFI_SCAN_FAILED) {
+        WiFi.scanNetworks(true);
+        return "";
+    }
+    if (n <= 0) {                         // -1 still running, 0 no networks found
         return "";
     }
     String result = WiFi.SSID(0);

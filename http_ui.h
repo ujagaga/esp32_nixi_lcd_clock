@@ -4,10 +4,9 @@
 /*
  *  Static HTML/CSS/JS page templates served by http_server.cpp.
  *  Kept here to keep the request handlers readable. The device serves a
- *  single config page: pick a WiFi AP (scanned live) + password, pick a
- *  weather location, save. The SSID input and location <select> options are
- *  filled in dynamically by http_server.cpp between CONFIG_FORM_HEAD and
- *  CONFIG_FORM_TAIL.
+ *  single config page: pick a WiFi AP (scanned live) + password, save. The
+ *  SSID input is filled in dynamically by http_server.cpp between
+ *  CONFIG_FORM_HEAD and CONFIG_FORM_TAIL.
  */
 
 #include <pgmspace.h>

@@ -6,19 +6,25 @@
 #include <EEPROM.h>
 #include "config.h"
 #include "wifi_connection.h"
+#include "NTPSync.h"
 #include "weather.h"
+
+#define PRECIP_CATEGORY(cat) ((cat) == "drizzle" || (cat) == "rain" || (cat) == "snow" || (cat) == "thunder")
+#define MAX_HOURLY 24
 
 struct Location { const char* name; double lat; double lon; };
 
 // A short predefined list, editable here. Index 0 (Novi Sad) is the default
-// on first boot / unset EEPROM.
+// on first boot / unset EEPROM. WEATHER_getLocationCount() adds one more slot
+// after these for "Custom (GPS)" (see WEATHER_setCustomLocation).
 static const Location LOCATIONS[] = {
-  { "Novi Sad", 45.243, 19.819 },
-  { "Belgrade", 44.787, 20.457 },
-  { "Nis",      43.320, 21.896 },
-  { "Subotica", 46.100, 19.667 },
+  { "Novi Sad",  45.243, 19.819 },
+  { "Beograd",   44.787, 20.457 },
+  { "Kikinda",   45.830, 20.460 },
+  { "Zrenjanin", 45.378, 20.390 },
 };
 static const int LOCATION_COUNT = sizeof(LOCATIONS) / sizeof(LOCATIONS[0]);
+#define CUSTOM_LOCATION_INDEX LOCATION_COUNT
 
 struct WeatherMeta { const char* description; const char* category; };
 
@@ -48,11 +54,18 @@ static int currentTemp = 0;
 static String currentDescription = "";
 static String currentCategory = "";
 
+// Rest-of-today hourly forecast, cached at fetch time; WEATHER_getPrecipState()
+// re-scans this against the current time on every call (cheap, <=24 entries).
+static String hourlyTime[MAX_HOURLY];       // "HH:MM"
+static String hourlyCategory[MAX_HOURLY];
+static int hourlyCount = 0;
+
 int WEATHER_getLocationCount(void){
-  return LOCATION_COUNT;
+  return LOCATION_COUNT + 1;   // + the trailing "Custom (GPS)" slot
 }
 
 String WEATHER_getLocationName(int index){
+  if(index == CUSTOM_LOCATION_INDEX) return "Custom (GPS)";
   if(index < 0 || index >= LOCATION_COUNT) return "";
   return String(LOCATIONS[index].name);
 }
@@ -62,13 +75,13 @@ int WEATHER_getLocationIndex(void){
     EEPROM.begin(EEPROM_SIZE);
     uint8_t stored = 0;
     EEPROM.get(LOCATION_EEPROM_ADDR, stored);
-    locationIndex = (stored < LOCATION_COUNT) ? stored : 0;
+    locationIndex = (stored <= CUSTOM_LOCATION_INDEX) ? stored : 0;
   }
   return locationIndex;
 }
 
 void WEATHER_setLocationIndex(int index){
-  if(index < 0 || index >= LOCATION_COUNT) return;
+  if(index < 0 || index > CUSTOM_LOCATION_INDEX) return;
   if(index == WEATHER_getLocationIndex()) return;
   locationIndex = index;
   EEPROM.begin(EEPROM_SIZE);
@@ -78,15 +91,49 @@ void WEATHER_setLocationIndex(int index){
   lastFetchMs = 0;
 }
 
+static float customLat = NAN, customLon = NAN;   // NAN: not yet loaded from EEPROM
+
+float WEATHER_getCustomLat(void){
+  if(isnan(customLat)){
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.get(CUSTOM_LAT_EEPROM_ADDR, customLat);
+    if(isnan(customLat)) customLat = LOCATIONS[0].lat;   // never set: fall back to Novi Sad
+  }
+  return customLat;
+}
+
+float WEATHER_getCustomLon(void){
+  if(isnan(customLon)){
+    EEPROM.begin(EEPROM_SIZE);
+    EEPROM.get(CUSTOM_LON_EEPROM_ADDR, customLon);
+    if(isnan(customLon)) customLon = LOCATIONS[0].lon;
+  }
+  return customLon;
+}
+
+void WEATHER_setCustomLocation(float lat, float lon){
+  customLat = lat;
+  customLon = lon;
+  EEPROM.begin(EEPROM_SIZE);
+  EEPROM.put(CUSTOM_LAT_EEPROM_ADDR, lat);
+  EEPROM.put(CUSTOM_LON_EEPROM_ADDR, lon);
+  EEPROM.commit();
+  WEATHER_setLocationIndex(CUSTOM_LOCATION_INDEX);
+  hasData = false;      // force a re-fetch even if already on the custom slot
+  lastFetchMs = 0;
+}
+
 void WEATHER_init(void){
   WEATHER_getLocationIndex();   // load persisted choice (or default to Novi Sad) up front
 }
 
 static void fetchForecast(void){
-  const Location& loc = LOCATIONS[WEATHER_getLocationIndex()];
-  String url = String(WEATHER_API_URL) + "?latitude=" + String(loc.lat, 3) +
-               "&longitude=" + String(loc.lon, 3) +
-               "&current=temperature_2m,weather_code,is_day&timezone=auto&forecast_days=1";
+  int idx = WEATHER_getLocationIndex();
+  double lat = (idx == CUSTOM_LOCATION_INDEX) ? WEATHER_getCustomLat() : LOCATIONS[idx].lat;
+  double lon = (idx == CUSTOM_LOCATION_INDEX) ? WEATHER_getCustomLon() : LOCATIONS[idx].lon;
+  String url = String(WEATHER_API_URL) + "?latitude=" + String(lat, 3) +
+               "&longitude=" + String(lon, 3) +
+               "&current=temperature_2m,weather_code,is_day&hourly=weather_code&timezone=auto&forecast_days=1";
 
   WiFiClientSecure client;
   client.setInsecure();   // open-meteo's cert isn't pinned; skip verification
@@ -94,14 +141,26 @@ static void fetchForecast(void){
   http.begin(client, url);
   int code = http.GET();
   if(code == 200){
-    DynamicJsonDocument doc(1024);
-    if(deserializeJson(doc, http.getStream()) == DeserializationError::Ok){
+    String payload = http.getString();
+    DynamicJsonDocument doc(4096);
+    DeserializationError err = deserializeJson(doc, payload);
+    if(err == DeserializationError::Ok){
       JsonObject cur = doc["current"];
       currentTemp = (int)round((double)cur["temperature_2m"]);
       WeatherMeta meta = weatherMeta(cur["weather_code"].as<int>());
       currentDescription = meta.description;
       currentCategory = meta.category;
       hasData = true;
+
+      JsonArray times = doc["hourly"]["time"];
+      JsonArray codes = doc["hourly"]["weather_code"];
+      hourlyCount = 0;
+      for(size_t i = 0; i < times.size() && hourlyCount < MAX_HOURLY; i++){
+        String t = times[i].as<String>();           // "2026-08-23T14:00"
+        hourlyTime[hourlyCount] = t.substring(11, 16);            // "14:00"
+        hourlyCategory[hourlyCount] = weatherMeta(codes[i].as<int>()).category;
+        hourlyCount++;
+      }
     }
   }
   http.end();
@@ -118,3 +177,29 @@ bool WEATHER_hasData(void){ return hasData; }
 int WEATHER_getTemp(void){ return currentTemp; }
 String WEATHER_getDescription(void){ return currentDescription; }
 String WEATHER_getCategory(void){ return currentCategory; }
+
+// Finds the next hour (after now) where the precip/no-precip state differs
+// from now, mirroring pls_reklama's _precip_message logic.
+static int findPrecipTransition(bool precipNow){
+  String nowHHMM = NTPS_getHH() + ":" + NTPS_getMM();
+  for(int i = 0; i < hourlyCount; i++){
+    if(hourlyTime[i] <= nowHHMM) continue;
+    if(PRECIP_CATEGORY(hourlyCategory[i]) != precipNow) return i;
+  }
+  return -1;
+}
+
+PrecipState WEATHER_getPrecipState(void){
+  if(!hasData || hourlyCount == 0) return PRECIP_NONE;
+  bool precipNow = PRECIP_CATEGORY(currentCategory);
+  int i = findPrecipTransition(precipNow);
+  if(i >= 0) return precipNow ? PRECIP_ENDS : PRECIP_STARTS;
+  return precipNow ? PRECIP_CONTINUES : PRECIP_NONE;
+}
+
+String WEATHER_getPrecipTime(void){
+  if(!hasData || hourlyCount == 0) return "";
+  bool precipNow = PRECIP_CATEGORY(currentCategory);
+  int i = findPrecipTransition(precipNow);
+  return (i >= 0) ? hourlyTime[i] : "";
+}

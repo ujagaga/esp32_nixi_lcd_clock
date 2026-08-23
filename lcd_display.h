@@ -15,20 +15,11 @@ enum FontStyle {
   Font9pt,
   Font12pt,
   Font18pt,
-  Font24pt
-};
-
-// One weather screen (onboard) + 4 digit screens (external panels, HH:MM).
-enum LcdScreen {
-  SCREEN_WEATHER,
-  SCREEN_DIGIT0,
-  SCREEN_DIGIT1,
-  SCREEN_DIGIT2,
-  SCREEN_DIGIT3
+  Font24pt,
+  FontWeather   // 12pt-equivalent, extended range incl. the degree sign (0xB0)
 };
 
 extern void LCD_init(void);
-extern void LCD_select(LcdScreen screen);
 extern void LCD_clear(void);
 extern void LCD_textSize(int txtSize);
 extern void LCD_color(uint16_t c);
@@ -39,11 +30,17 @@ extern int LCD_getX(void);
 extern int LCD_getY(void);
 extern void LCD_setCursor(int x, int y);
 extern void LCD_writeCentered(String msg, int y);
-extern void LCD_writeBigDigit(char digit);
 extern void LCD_clearStringArea(String msg);
 extern uint16_t LCD_getBgColor(void);
 extern void LCD_setBgColor(uint16_t color);
 extern uint16_t LCD_getFgColor(void);
 extern void LCD_setFgColor(uint16_t color);
+extern void LCD_setBacklight(uint8_t percent);   // 0..100
+
+// 4 external bit-banged-SPI panels, one big digit each: hour tens, hour units,
+// minute tens, minute units.
+extern void DIGITS_init(void);
+extern void DIGITS_show(char hTens, char hUnits, char mTens, char mUnits);
+extern void DIGITS_setBacklight(uint8_t percent);   // 0..100
 
 #endif

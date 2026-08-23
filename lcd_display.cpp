@@ -1,130 +1,290 @@
 #include "config.h"
 
 #ifdef USE_ADAFRUIT_ST7789
-#error "USE_ADAFRUIT_ST7789 does not support the 5-screen setup (external panels are bit-banged, which Adafruit_ST7789 here isn't wired for) -- leave USE_ADAFRUIT_ST7789 undefined to use the custom driver."
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+
+Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
+#else
+#include <Adafruit_GFX.h>
+#include <SPI.h>
+
+// 172x320 panel is centered on the ST7789 240x320 GRAM -> 34px column offset.
+#define X_OFFSET_DEFAULT 34
+#define Y_OFFSET_DEFAULT 0
+
+class ST7789_Custom : public Adafruit_GFX {
+  public:
+    ST7789_Custom() : Adafruit_GFX(SCREEN_W, SCREEN_H) {
+        _x_offset = X_OFFSET_DEFAULT;
+        _y_offset = Y_OFFSET_DEFAULT;
+    }
+
+    void begin() {
+      pinMode(TFT_DC, OUTPUT);
+      pinMode(TFT_RST, OUTPUT);
+      pinMode(TFT_CS, OUTPUT);
+      digitalWrite(TFT_CS, LOW);   // single SPI device, keep selected
+
+      ledcAttach(TFT_BL, TFT_BL_FREQ, TFT_BL_RES_BITS);
+      ledcWrite(TFT_BL, TFT_BL_DUTY);
+
+      SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+      SPI.setFrequency(24000000);
+      SPI.setDataMode(SPI_MODE3);
+
+      digitalWrite(TFT_RST, HIGH); delay(50);
+      digitalWrite(TFT_RST, LOW);  delay(50);
+      digitalWrite(TFT_RST, HIGH); delay(150);
+
+      sendCmd(0x01); delay(150); // Software Reset
+      sendCmd(0x11); delay(150); // Exit Sleep
+      sendCmd(0x3A); sendData(0x05); // 16-bit color
+      sendCmd(0x21);                 // Inversion ON (required for this IPS panel)
+      setRotation(0);                // Set initial orientation
+      sendCmd(0x13); // Normal mode
+      sendCmd(0x29); // Display on
+    }
+
+    void setRotation(uint8_t m) override {
+      Adafruit_GFX::setRotation(m);
+      sendCmd(0x36); // MADCTL
+      switch (rotation) {
+        case 0: // Portrait
+          sendData(0x00);
+          _width  = SCREEN_W;
+          _height = SCREEN_H;
+          _x_offset = X_OFFSET_DEFAULT;
+          _y_offset = Y_OFFSET_DEFAULT;
+          break;
+        case 1: // Landscape (90 deg)
+          sendData(0x60);
+          _width  = SCREEN_H;
+          _height = SCREEN_W;
+          _x_offset = Y_OFFSET_DEFAULT;
+          _y_offset = X_OFFSET_DEFAULT;
+          break;
+        case 2: // Portrait Inverted
+          sendData(0xC0);
+          _width  = SCREEN_W;
+          _height = SCREEN_H;
+          _x_offset = X_OFFSET_DEFAULT;
+          _y_offset = Y_OFFSET_DEFAULT;
+          break;
+        case 3: // Landscape Inverted
+          sendData(0xA0);
+          _width  = SCREEN_H;
+          _height = SCREEN_W;
+          _x_offset = Y_OFFSET_DEFAULT;
+          _y_offset = X_OFFSET_DEFAULT;
+          break;
+      }
+    }
+
+    void drawPixel(int16_t x, int16_t y, uint16_t color) override {
+      if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height)) return;
+      setAddrWindow(x, y, 1, 1);
+      SPI.write16(color);
+    }
+
+    void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) override {
+      if ((x >= _width) || (y >= _height)) return;
+      setAddrWindow(x, y, w, h);
+      for (uint32_t i = 0; i < (uint32_t)w * h; i++) SPI.write16(color);
+    }
+
+  private:
+    uint16_t _x_offset, _y_offset;
+
+    void sendCmd(uint8_t c) { digitalWrite(TFT_DC, LOW); SPI.write(c); }
+    void sendData(uint8_t d) { digitalWrite(TFT_DC, HIGH); SPI.write(d); }
+
+    void setAddrWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+      uint16_t x0 = x + _x_offset, x1 = x + w - 1 + _x_offset;
+      uint16_t y0 = y + _y_offset, y1 = y + h - 1 + _y_offset;
+      sendCmd(0x2A); sendData(x0 >> 8); sendData(x0 & 0xFF); sendData(x1 >> 8); sendData(x1 & 0xFF);
+      sendCmd(0x2B); sendData(y0 >> 8); sendData(y0 & 0xFF); sendData(y1 >> 8); sendData(y1 & 0xFF);
+      sendCmd(0x2C); digitalWrite(TFT_DC, HIGH);
+    }
+};
+
+ST7789_Custom tft;
 #endif
 
-#include "ST7789_Custom.h"
+// Same 172x320 panel as onboard, driven over bit-banged SPI (SCLK/MOSI/DC shared
+// across all 4, CS per-panel) since the onboard hardware SPI pins aren't broken
+// out on this board.
+#define DIGIT_X_OFFSET 34   // mirrors the onboard driver's GRAM-centering offset
 
-static ST7789_Custom panelWeather(TFT_CS, TFT_RST, TFT_DC, TFT_BL, TFT_SCLK, TFT_MOSI, true);
-static ST7789_Custom panelDigit[NUM_DIGIT_SCREENS] = {
-  ST7789_Custom(TFT_CS_D0, TFT_EXT_RST, TFT_EXT_DC, TFT_EXT_BL, TFT_EXT_SCLK, TFT_EXT_MOSI, false),
-  ST7789_Custom(TFT_CS_D1, TFT_EXT_RST, TFT_EXT_DC, TFT_EXT_BL, TFT_EXT_SCLK, TFT_EXT_MOSI, false),
-  ST7789_Custom(TFT_CS_D2, TFT_EXT_RST, TFT_EXT_DC, TFT_EXT_BL, TFT_EXT_SCLK, TFT_EXT_MOSI, false),
-  ST7789_Custom(TFT_CS_D3, TFT_EXT_RST, TFT_EXT_DC, TFT_EXT_BL, TFT_EXT_SCLK, TFT_EXT_MOSI, false),
+class ST7789_BitBang : public Adafruit_GFX {
+  public:
+    ST7789_BitBang(uint8_t sclk, uint8_t mosi, uint8_t cs, uint8_t dc)
+      : Adafruit_GFX(SCREEN_W, SCREEN_H), _sclk(sclk), _mosi(mosi), _cs(cs), _dc(dc) {}
+
+    void begin() {
+      pinMode(_sclk, OUTPUT);
+      pinMode(_mosi, OUTPUT);
+      pinMode(_cs, OUTPUT);
+      pinMode(_dc, OUTPUT);
+      digitalWrite(_sclk, LOW);
+      digitalWrite(_cs, HIGH);
+
+      digitalWrite(_cs, LOW);
+      sendCmd(0x01); delay(150); // Software Reset
+      sendCmd(0x11); delay(150); // Exit Sleep
+      sendCmd(0x3A); sendData(0x05); // 16-bit color
+      sendCmd(0x21);                 // Inversion ON (required for this IPS panel)
+      sendCmd(0x36); sendData(0x00); // MADCTL, portrait
+      sendCmd(0x13); // Normal mode
+      sendCmd(0x29); // Display on
+      digitalWrite(_cs, HIGH);
+    }
+
+    void drawPixel(int16_t x, int16_t y, uint16_t color) override {
+      if ((x < 0) || (x >= _width) || (y < 0) || (y >= _height)) return;
+      digitalWrite(_cs, LOW);
+      setAddrWindow(x, y, 1, 1);
+      write16(color);
+      digitalWrite(_cs, HIGH);
+    }
+
+    void fillRect(int16_t x, int16_t y, int16_t w, int16_t h, uint16_t color) override {
+      if ((x >= _width) || (y >= _height)) return;
+      digitalWrite(_cs, LOW);
+      setAddrWindow(x, y, w, h);
+      for (uint32_t i = 0; i < (uint32_t)w * h; i++) write16(color);
+      digitalWrite(_cs, HIGH);
+    }
+
+  private:
+    uint8_t _sclk, _mosi, _cs, _dc;
+
+    void writeByte(uint8_t b) {
+      for (int8_t i = 7; i >= 0; i--) {
+        digitalWrite(_mosi, (b >> i) & 0x01);
+        digitalWrite(_sclk, HIGH);
+        digitalWrite(_sclk, LOW);
+      }
+    }
+    void write16(uint16_t v) { writeByte(v >> 8); writeByte(v & 0xFF); }
+    void sendCmd(uint8_t c) { digitalWrite(_dc, LOW); writeByte(c); }
+    void sendData(uint8_t d) { digitalWrite(_dc, HIGH); writeByte(d); }
+
+    void setAddrWindow(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
+      uint16_t x0 = x + DIGIT_X_OFFSET, x1 = x + w - 1 + DIGIT_X_OFFSET;
+      uint16_t y0 = y, y1 = y + h - 1;
+      sendCmd(0x2A); sendData(x0 >> 8); sendData(x0 & 0xFF); sendData(x1 >> 8); sendData(x1 & 0xFF);
+      sendCmd(0x2B); sendData(y0 >> 8); sendData(y0 & 0xFF); sendData(y1 >> 8); sendData(y1 & 0xFF);
+      sendCmd(0x2C); digitalWrite(_dc, HIGH);
+    }
 };
-static ST7789_Custom* panels[1 + NUM_DIGIT_SCREENS] = {
-  &panelWeather, &panelDigit[0], &panelDigit[1], &panelDigit[2], &panelDigit[3]
+
+static ST7789_BitBang digitPanels[4] = {
+  ST7789_BitBang(DIGIT_SCLK, DIGIT_MOSI, DIGIT_CS0, DIGIT_DC),
+  ST7789_BitBang(DIGIT_SCLK, DIGIT_MOSI, DIGIT_CS1, DIGIT_DC),
+  ST7789_BitBang(DIGIT_SCLK, DIGIT_MOSI, DIGIT_CS2, DIGIT_DC),
+  ST7789_BitBang(DIGIT_SCLK, DIGIT_MOSI, DIGIT_CS3, DIGIT_DC),
 };
-static ST7789_Custom* activePanel = &panelWeather;
 
 #include <Fonts/FreeMonoBold9pt7b.h>
 #include <Fonts/FreeMonoBold12pt7b.h>
 #include <Fonts/FreeMonoBold18pt7b.h>
 #include <Fonts/FreeMonoBold24pt7b.h>
+#include "FreeMonoBold12pt8b.h"
+#include "FreeMonoBold175pt7b.h"
 
 #include "lcd_display.h"
 
 static uint16_t bgColor = C_BLACK;
 static uint16_t fgColor = C_YELLOW;
 
+#ifdef USE_ADAFRUIT_ST7789
 void LCD_init()
 {
-  for(int i = 0; i < 1 + NUM_DIGIT_SCREENS; i++){
-    panels[i]->begin();
-  }
-  // Weather screen: wide landscape layout for temp/description text.
-  panelWeather.setRotation(1);
-  // Digit screens: tall portrait, one big glyph each.
-  for(int i = 0; i < NUM_DIGIT_SCREENS; i++){
-    panelDigit[i].setRotation(0);
-  }
+  ledcAttach(TFT_BL, TFT_BL_FREQ, TFT_BL_RES_BITS);
+  ledcWrite(TFT_BL, TFT_BL_DUTY);
+  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+  tft.init(SCREEN_W, SCREEN_H, SPI_MODE3);
+  tft.setRotation(0);
 
-  for(int i = 0; i < 1 + NUM_DIGIT_SCREENS; i++){
-    panels[i]->fillScreen(bgColor);
-    panels[i]->setCursor(0, 0);
-    panels[i]->setTextSize(1);
-    panels[i]->setTextColor(fgColor);
-  }
+  tft.fillScreen(bgColor);
+  tft.setCursor(0, 0);
+  tft.setTextSize(1);
+  tft.setTextColor(fgColor);
 }
+#else
+void LCD_init()
+{
+  tft.begin();
+  // Set to landscape for a wide "bar" look. Use 0 or 2 for portrait.
+  tft.setRotation(0);
 
-void LCD_select(LcdScreen screen){
-  activePanel = panels[screen];
+  tft.fillScreen(bgColor);
+  tft.setCursor(0, 0);
+  tft.setTextSize(1);
+  tft.setTextColor(fgColor);
 }
+#endif
 
 void LCD_setFont(FontStyle id){
   if(id == Font24pt){
-    activePanel->setFont(&FreeMonoBold24pt7b);
+    tft.setFont(&FreeMonoBold24pt7b);
   }else if(id == Font18pt){
-    activePanel->setFont(&FreeMonoBold18pt7b);
+    tft.setFont(&FreeMonoBold18pt7b);
   }else if(id == Font12pt){
-    activePanel->setFont(&FreeMonoBold12pt7b);
+    tft.setFont(&FreeMonoBold12pt7b);
+  }else if(id == FontWeather){
+    tft.setFont(&FreeMonoBold12pt8b);
   }else{
-    activePanel->setFont(&FreeMonoBold9pt7b);
+    tft.setFont(&FreeMonoBold9pt7b);
   }
 }
 
 void LCD_clear()
 {
-  activePanel->fillScreen(bgColor);
-  activePanel->setCursor(0, 0);
-  activePanel->setTextColor(fgColor);
-  activePanel->setTextSize(1);
+  tft.fillScreen(bgColor);
+  tft.setCursor(0, 0);
+  tft.setTextColor(fgColor);
+  tft.setTextSize(1);
   LCD_setFont(Font9pt);
 }
 
 void LCD_setX(int x){
-  int y = activePanel->getCursorY();
-  activePanel->setCursor(x, y);
+  int y = tft.getCursorY();
+  tft.setCursor(x, y);
 }
 
 int LCD_getX(void){
-  return activePanel->getCursorX();
+  return tft.getCursorX();
 }
 
 int LCD_getY(void){
-  return activePanel->getCursorY();
+  return tft.getCursorY();
 }
 
 void LCD_setCursor(int x, int y){
-  activePanel->setCursor(x, y);
+  tft.setCursor(x, y);
 }
 
 // Write msg horizontally centered on the current screen at baseline y.
 void LCD_writeCentered(String msg, int y){
   int16_t x1, y1;
   uint16_t w, h;
-  activePanel->getTextBounds(msg, 0, y, &x1, &y1, &w, &h);
-  int x = (activePanel->width() - (int)w) / 2;
-  activePanel->setCursor(x, y);
-  activePanel->print(msg);
-}
-
-// Clear the active screen and draw one big digit, centered in both axes
-// (nixie-tube look for the external digit panels).
-void LCD_writeBigDigit(char digit){
-  LCD_clear();
-  LCD_setFont(Font24pt);
-  activePanel->setTextSize(4);   // tune once flashed -- can't verify pixel fit from here
-
-  char buf[2] = { digit, 0 };
-  int16_t x1, y1;
-  uint16_t w, h;
-  activePanel->getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
-  int x = (activePanel->width() - (int)w) / 2 - x1;
-  int y = (activePanel->height() - (int)h) / 2 - y1;
-  activePanel->setCursor(x, y);
-  activePanel->print(buf);
+  tft.getTextBounds(msg, 0, y, &x1, &y1, &w, &h);
+  int x = (tft.width() - (int)w) / 2 - x1;   // x1: glyph's left-side bearing, must offset for it to truly center the ink
+  tft.setCursor(x, y);
+  tft.print(msg);
 }
 
 void LCD_textSize(int txtSize)
 {
-  activePanel->setTextSize(txtSize);
+  tft.setTextSize(txtSize);
 }
 
 void LCD_color(uint16_t c)
 {
-  activePanel->setTextColor(c);
+  tft.setTextColor(c);
 }
 
 uint16_t LCD_getBgColor(void){
@@ -143,11 +303,19 @@ void LCD_setFgColor(uint16_t color){
   fgColor = color;
 }
 
+void LCD_setBacklight(uint8_t percent){
+  if(percent > 100){
+    percent = 100;
+  }
+  uint32_t maxDuty = (1u << TFT_BL_RES_BITS) - 1;
+  ledcWrite(TFT_BL, (uint32_t)percent * maxDuty / 100);
+}
+
 // NOTE: FreeType fonts draw on top of base line, so at coordinates 0,0 the text starts outside the screen.
 // First set font size and write a new line character. This will set the cursor at the right place for first row.
 void LCD_write(String msg)
 {
-  activePanel->print(msg);
+  tft.print(msg);
 }
 
 void LCD_clearStringArea(String msg) {
@@ -155,8 +323,57 @@ void LCD_clearStringArea(String msg) {
   uint16_t w, h;
 
   // This calculates the bounding box of the string
-  activePanel->getTextBounds(msg, activePanel->getCursorX(), activePanel->getCursorY(), &x1, &y1, &w, &h);
+  tft.getTextBounds(msg, tft.getCursorX(), tft.getCursorY(), &x1, &y1, &w, &h);
 
   // Fill that box with black
-  activePanel->fillRect(x1, y1, w, h, C_BLACK);
+  tft.fillRect(x1, y1, w, h, C_BLACK);
+}
+
+void DIGITS_init()
+{
+  pinMode(DIGIT_RST, OUTPUT);
+  digitalWrite(DIGIT_RST, HIGH); delay(50);
+  digitalWrite(DIGIT_RST, LOW);  delay(50);
+  digitalWrite(DIGIT_RST, HIGH); delay(150);
+
+  ledcAttach(DIGIT_BL, TFT_BL_FREQ, TFT_BL_RES_BITS);
+  ledcWrite(DIGIT_BL, TFT_BL_DUTY);
+
+  for (int i = 0; i < 4; i++) {
+    digitPanels[i].begin();
+    digitPanels[i].setFont(&FreeMonoBold175pt7b);
+    digitPanels[i].setTextColor(C_YELLOW);
+    digitPanels[i].fillScreen(C_BLACK);
+  }
+}
+
+static void showDigit(ST7789_BitBang &panel, char digit)
+{
+  int16_t x1, y1;
+  uint16_t w, h;
+  String s = String(digit);
+  panel.getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
+  int x = (SCREEN_W - (int)w) / 2 - x1;
+  int y = (SCREEN_H - (int)h) / 2 - y1;
+
+  panel.fillScreen(C_BLACK);
+  panel.setCursor(x, y);
+  panel.print(s);
+}
+
+void DIGITS_show(char hTens, char hUnits, char mTens, char mUnits)
+{
+  showDigit(digitPanels[0], hTens);
+  showDigit(digitPanels[1], hUnits);
+  showDigit(digitPanels[2], mTens);
+  showDigit(digitPanels[3], mUnits);
+}
+
+void DIGITS_setBacklight(uint8_t percent)
+{
+  if(percent > 100){
+    percent = 100;
+  }
+  uint32_t maxDuty = (1u << TFT_BL_RES_BITS) - 1;
+  ledcWrite(DIGIT_BL, (uint32_t)percent * maxDuty / 100);
 }

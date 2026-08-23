@@ -1,12 +1,5 @@
 {
-    "quickCommandButtons.buttons": [
-        {
-            "color": "#FFD700",
-            "command": "claude",
-            "insertOnly": false,
-            "name": "$(robot) Claude",
-            "useVsCodeApi": false
-        },
+    "quickCommandButtons.buttons": [        
         {
             "color": "#8BC34A",
             "command": "./tools/build.sh",
@@ -23,9 +16,9 @@
         },
         {
             "color": "#8BC34A",
-            "command": "stty -F /dev/ttyUSB0 115200 raw && cat /dev/ttyUSB0",
+            "command": "stty -F /dev/ttyACM0 115200 raw && cat /dev/ttyACM0",
             "insertOnly": false,
-            "name": "🔌 ttyUSB0@115200",
+            "name": "🔌 ttyACM0@115200",
             "useVsCodeApi": false
         }
     ]

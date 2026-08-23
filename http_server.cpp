@@ -2,15 +2,15 @@
  *  Author: Rada Berar
  *  email: ujagaga@gmail.com
  *
- *  HTTP server which generates the web browser pages. Its whole job is WiFi +
- *  weather-location setup: scan/pick a station AP + password, pick a weather
- *  location, save. Everything else runs standalone once connected.
+ *  HTTP server which generates the web browser pages. Its whole job is WiFi
+ *  reconfiguration: scan/pick a station AP + password, save. Everything else
+ *  runs standalone once connected.
  */
 
 #include <WebServer.h>
 #include "wifi_connection.h"
 #include "config.h"
-#include "esp32_nixi_oled_clock.h"
+#include "esp32_nixi_lcd_clock.h"
 #include "weather.h"
 #include "http_ui.h"
 
@@ -23,22 +23,35 @@ void showStartPage() {
 
   String response = FPSTR(HTML_BEGIN);
   response += FPSTR(CONFIG_HTML_0);
+  if(WIFIC_stationConnected()){
+    response += "<p>Connected to <b>" + WIFIC_getStSSID() + "</b></p>";
+  }else{
+    response += "<p>Not connected to a WiFi network yet.</p>";
+  }
   response += FPSTR(CONFIG_HTML_1);
   response += FPSTR(CONFIG_FORM_HEAD);
 
   response += "<input id='s' name='s' length=32 value='" + WIFIC_getStSSID() +
               "' placeholder='SSID (Leave blank for AP mode)'><br>";
   response += "<input id='p' name='p' length=32 placeholder='Password'><br>";
-  response += "<label for='loc'>Weather location</label><br><select id='loc' name='loc'>";
-  int selected = WEATHER_getLocationIndex();
+
+  int selectedLoc = WEATHER_getLocationIndex();
+  int customLocIndex = WEATHER_getLocationCount() - 1;
+  response += "<label for='loc'>Weather location</label><br>";
+  response += "<select id='loc' name='loc' onchange=\"document.getElementById('gps').style.display=(this.value=='"
+              + String(customLocIndex) + "')?'block':'none';\">";
   for(int i = 0; i < WEATHER_getLocationCount(); i++){
     response += "<option value='" + String(i) + "'";
-    if(i == selected){
+    if(i == selectedLoc){
       response += " selected";
     }
     response += ">" + WEATHER_getLocationName(i) + "</option>";
   }
   response += "</select><br>";
+  response += "<div id='gps' style='display:" + String(selectedLoc == customLocIndex ? "block" : "none") + "'>";
+  response += "<input id='lat' name='lat' value='" + String(WEATHER_getCustomLat(), 4) + "' placeholder='Latitude'><br>";
+  response += "<input id='lon' name='lon' value='" + String(WEATHER_getCustomLon(), 4) + "' placeholder='Longitude'><br>";
+  response += "</div>";
 
   response += FPSTR(CONFIG_FORM_TAIL);
   response += FPSTR(HTML_END);
@@ -71,7 +84,11 @@ static void saveWiFi(void){
       return;
   }
 
-  WEATHER_setLocationIndex(loc);
+  if(loc == WEATHER_getLocationCount() - 1){
+    WEATHER_setCustomLocation(webServer->arg("lat").toFloat(), webServer->arg("lon").toFloat());
+  }else{
+    WEATHER_setLocationIndex(loc);
+  }
 
   String st_ssid = WIFIC_getStSSID();
   String st_pass = WIFIC_getStPass();
@@ -96,7 +113,7 @@ static void saveWiFi(void){
   MAIN_setStatusMsg(http_statusMessage);
   showStatusPage();
 
-  WIFIC_stationMode();
+  WIFIC_stationMode();   // explicit save: connect now, scanning is done for this visit
 }
 
 static void apList(void){
